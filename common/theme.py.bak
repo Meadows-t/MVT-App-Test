@@ -1,0 +1,21 @@
+from __future__ import annotations
+from pathlib import Path
+from common.path_utils import ensure_dir
+
+
+def write_theme_config(app_root, theme_dict):
+    app_root = Path(app_root)
+    st_dir = app_root / ".streamlit"
+    ensure_dir(st_dir)
+    cfg_path = st_dir / "config.toml"
+
+    lines = ["[theme]"]
+    for k, v in (theme_dict or {}).items():
+        if v is None:
+            continue
+        lines.append('{} = "{}"'.format(k, v))
+
+    cfg_path.write_text("
+".join(lines) + "
+", encoding="utf-8")
+    return cfg_path

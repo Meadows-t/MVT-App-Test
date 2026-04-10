@@ -1,0 +1,112 @@
+# -*- coding: utf-8 -*-
+"""att_tools
+Read sections from VISSIM .att files.
+
+Queue:     $QUEUECOUNTEREVALUATION
+JT:        $VEHICLETRAVELTIMEMEASUREMENTEVALUATION
+Movement:  $MOVEMENTEVALUATION
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from io import StringIO
+import pandas as pd
+
+
+def _read_section(path: str, prefix: str) -> pd.DataFrame:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(path)
+
+    lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+    idx = None
+    up = prefix.upper()
+    for i, line in enumerate(lines):
+        if line.strip().upper().startswith(up):
+            idx = i
+            break
+
+    if idx is None:
+        raise ValueError(f"Could not find section {prefix}")
+
+    header_line = lines[idx].strip()
+    if ":" not in header_line:
+        raise ValueError(f"Malformed section header {prefix}")
+
+    header = header_line.split(":", 1)[1].strip()
+    data_lines = [header]
+
+    for line in lines[idx + 1:]:
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("$"):
+            break
+        if s.startswith("*"):
+            continue
+        data_lines.append(s)
+
+    csv_text = "\n".join(data_lines)
+return pd.read_csv(StringIO(csv_text), sep=";", engine="python", on_bad_lines="skip")
+
+
+def read_queue_att(path: str) -> pd.DataFrame:
+    return _read_section(path, "$QUEUECOUNTEREVALUATION")
+
+
+def normalise_queue_att(df: pd.DataFrame) -> pd.DataFrame:
+    cols = {str(c).strip().upper(): c for c in df.columns}
+    run_col = cols.get("SIMRUN") or cols.get("RUN")
+    int_col = cols.get("TIMEINT") or cols.get("TIMEINTERVAL")
+    qc_col = cols.get("QUEUECOUNTER")
+    qmax_col = cols.get("QLENMAX")
+
+    miss = [n for n, c in [("SIMRUN", run_col), ("TIMEINT", int_col), ("QUEUECOUNTER", qc_col), ("QLENMAX", qmax_col)] if c is None]
+    if miss:
+        raise KeyError(f"Queue ATT missing columns {miss}. Available: {list(df.columns)}")
+
+    out = df[[run_col, int_col, qc_col, qmax_col]].copy()
+    out.columns = ["SimRun", "TimeInterval", "QueueCounter", "QLenMax"]
+
+    out["SimRun"] = out["SimRun"].astype(str).str.strip()
+    out = out[out["SimRun"].str.match(r"^\d+$")].copy()
+    out["SimRun"] = out["SimRun"].astype(int)
+
+    out["TimeInterval"] = out["TimeInterval"].astype(str).str.strip().str.replace("–", "-").str.replace("—", "-")
+    out["QueueCounter"] = out["QueueCounter"].astype(str).str.strip()
+    out["QLenMax"] = pd.to_numeric(out["QLenMax"], errors="coerce")
+
+    return out
+
+
+def read_jt_att(path: str) -> pd.DataFrame:
+    return _read_section(path, "$VEHICLETRAVELTIMEMEASUREMENTEVALUATION")
+
+
+def normalise_jt_att_base(df: pd.DataFrame) -> pd.DataFrame:
+    cols = {str(c).strip().upper(): c for c in df.columns}
+    run_col = cols.get("SIMRUN") or cols.get("RUN")
+    int_col = cols.get("TIMEINT") or cols.get("TIMEINTERVAL")
+    meas_col = cols.get("VEHICLETRAVELTIMEMEASUREMENT")
+
+    miss = [n for n, c in [("SIMRUN", run_col), ("TIMEINT", int_col), ("VEHICLETRAVELTIMEMEASUREMENT", meas_col)] if c is None]
+    if miss:
+        raise KeyError(f"JT ATT missing columns {miss}. Available: {list(df.columns)}")
+
+    out = df.copy()
+    out.rename(columns={run_col: "SimRun", int_col: "TimeInterval", meas_col: "VTTM_ID"}, inplace=True)
+
+    out["SimRun"] = out["SimRun"].astype(str).str.strip()
+    out = out[out["SimRun"].str.match(r"^\d+$")].copy()
+    out["SimRun"] = out["SimRun"].astype(int)
+
+    out["TimeInterval"] = out["TimeInterval"].astype(str).str.strip().str.replace("–", "-").str.replace("—", "-")
+    out["VTTM_ID"] = out["VTTM_ID"].astype(str).str.strip()
+
+    return out
+
+
+def read_mov_att(path: str) -> pd.DataFrame:
+    return _read_section(path, "$MOVEMENTEVALUATION")
