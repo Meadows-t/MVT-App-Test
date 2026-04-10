@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import streamlit as st
 import pandas as pd
+import tempfile
+import os
 
 from unified_inpx_tools import parse_inpx
 
@@ -36,16 +38,83 @@ def _safe_int(x, default=None):
 def render():
     st.subheader("Common inputs")
 
-    model_path = st.text_input(
-        "Model path (folder recommended)",
-        value=st.session_state.get("model_path", ""),
-        key="model_path",
+    # ✅ NEW: File upload option
+    st.markdown("### Input Method")
+    input_method = st.radio(
+        "Choose input method",
+        ["Local Path (existing)", "Upload .inpx File"],
+        horizontal=True,
+        help="Select whether to use a local model folder or upload an .inpx file"
     )
-    root = model_root(model_path)
-    if not root:
-        st.info("Paste model folder path.")
-        st.stop()
 
+    root = None
+    inpx_file_path = None
+    uploaded_inpx = None
+
+    if input_method == "Local Path (existing)":
+        # ✅ EXISTING: Original path-based approach
+        model_path = st.text_input(
+            "Model path (folder recommended)",
+            value=st.session_state.get("model_path", ""),
+            key="model_path",
+        )
+        root = model_root(model_path)
+        if not root:
+            st.info("Paste model folder path.")
+            st.stop()
+        
+        # Find .inpx in the directory
+        inpx_hits = list(root.glob("*.inpx"))
+        if not inpx_hits:
+            st.error("No .inpx file found in the model folder.")
+            st.stop()
+        
+        inpx_file_path = str(inpx_hits[0])
+        st.success(f"📁 Found .inpx file: {inpx_hits[0].name}")
+
+    else:
+        # ✅ NEW: File upload approach
+        uploaded_inpx = st.file_uploader(
+            "Upload VISSIM .inpx Network File",
+            type=["inpx"],
+            help="Select your VISSIM network file (.inpx format, version 6.0+)"
+        )
+        
+        if uploaded_inpx is None:
+            st.info("👆 Please upload a VISSIM .inpx file to continue")
+            st.stop()
+        
+        # Display file info
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("📄 Filename", uploaded_inpx.name)
+        with col2:
+            st.metric("📦 Size", f"{uploaded_inpx.size / 1024:.2f} KB")
+        
+        # ✅ Save uploaded file to temporary location
+        # We need an actual file path for parse_inpx() function
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.inpx', mode='wb') as tmp_file:
+            tmp_file.write(uploaded_inpx.getbuffer())
+            inpx_file_path = tmp_file.name
+            # Store in session state for cleanup later
+            st.session_state['temp_inpx_path'] = inpx_file_path
+        
+        st.success(f"✅ File uploaded: {uploaded_inpx.name}")
+        
+        # ✅ For uploaded files, we need to establish a working directory
+        # Use a model path input or default to current directory
+        model_path = st.text_input(
+            "Working directory (for outputs)",
+            value=st.session_state.get("model_path", str(Path.cwd())),
+            key="model_path",
+            help="Directory where outputs and workbooks will be saved"
+        )
+        root = model_root(model_path)
+        if not root:
+            root = Path(model_path)
+            root.mkdir(parents=True, exist_ok=True)
+
+    # ✅ Continue with existing logic using inpx_file_path
     cfg_yaml = load_cfg(root)
     proj_default = (cfg_yaml.get("project", {}) or {}).get("project_name", "")
     active_wb_cfg = (cfg_yaml.get("workbook", {}) or {}).get("active", "")
@@ -107,12 +176,13 @@ def render():
         "Generate Inputs workbook (timestamped)",
         expanded=(wb_mode == "Generate new (timestamped)"),
     ):
-        inpx_hits = list(root.glob("*.inpx"))
-        if not inpx_hits:
-            st.error("No INPX found in model folder.")
+        # ✅ MODIFIED: Use inpx_file_path instead of searching
+        try:
+            info = parse_inpx(inpx_file_path)
+        except Exception as e:
+            st.error(f"Failed to parse .inpx file: {e}")
             st.stop()
-
-        info = parse_inpx(str(inpx_hits[0]))
+        
         vc_ids = [str(x.get("no")).strip() for x in info.get("vehicle_classes", []) if x.get("no")]
         vc_map = {str(x.get("no")).strip(): str(x.get("name")).strip()
                   for x in info.get("vehicle_classes", []) if x.get("no")}
@@ -318,9 +388,13 @@ def render():
             key="selected_runs",
         )
 
-    # INPX mappings
-    inpx_hits = list(root.glob("*.inpx"))
-    info = parse_inpx(str(inpx_hits[0])) if inpx_hits else {}
+    # ✅ MODIFIED: Parse INPX mappings using inpx_file_path
+    try:
+        info = parse_inpx(inpx_file_path)
+    except Exception as e:
+        st.error(f"Failed to parse .inpx file for mappings: {e}")
+        info = {}
+    
     qc_id_to_name = {str(x.get("no")).strip(): str(x.get("name")).strip()
                      for x in info.get("queue_counters", []) if x.get("no") and x.get("name")}
     qc_name_to_id = {v: k for k, v in qc_id_to_name.items()}
@@ -463,3 +537,14 @@ def render():
             st.success("Flow TOTAL updated. Open Flow outputs tab.")
         except Exception as e:
             st.error(f"Flow TOTAL failed: {e}")
+    
+    # ✅ CLEANUP: Remove temporary file when done
+    # This should ideally be in a session cleanup callback, but for simplicity:
+    if 'temp_inpx_path' in st.session_state:
+        temp_path = st.session_state['temp_inpx_path']
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+                del st.session_state['temp_inpx_path']
+            except Exception:
+                pass  # Ignore cleanup errors
